@@ -1,4 +1,6 @@
 import logging
+import torch
+import numpy as np
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from app.schemas import PaperAnalysisResponse, PaperParseRequest
@@ -31,6 +33,27 @@ def get_claim_extractor():
         from app.services.claim_extraction import ClaimExtractor
 
         _claim_extractor = ClaimExtractor()
+        
+        # Override/wrap claim extractor to generate and attach embeddings to Claims
+        original_extract_claims = _claim_extractor.extract_claims
+
+        def wrapped_extract_claims(document) -> list:
+            claims = original_extract_claims(document)
+            _claim_extractor._initialize_model()
+            for claim in claims:
+                tokens = _claim_extractor.tokenizer(claim.text, truncation=True, max_length=128, return_tensors="pt")
+                with torch.no_grad():
+                    output = _claim_extractor.model(**tokens)
+                if hasattr(output, "pooler_output") and output.pooler_output is not None:
+                    emb = output.pooler_output
+                else:
+                    emb = output.last_hidden_state[:, 0, :]
+                # Convert to a list of floats
+                claim.embedding = emb[0].cpu().numpy().tolist()
+            return claims
+
+        _claim_extractor.extract_claims = wrapped_extract_claims
+        
     return _claim_extractor
 
 
@@ -41,6 +64,50 @@ def get_enriched_analyzer():
 
         _enriched_analyzer = EnrichedPaperAnalysis()
     return _enriched_analyzer
+
+
+def _post_process_graph(parsed, claims, review, builder):
+    # Determine stance label
+    stance_dict = getattr(review, "stance", {})
+    stance_label = "neutral"
+    if stance_dict:
+        max_key = max(stance_dict, key=lambda k: stance_dict.get(k, 0.0))
+        if max_key == "PTLDS":
+            stance_label = "supporting"
+        elif max_key == "CLD":
+            stance_label = "opposing"
+
+    method_quality = getattr(review, "method_quality", 0.0)
+
+    try:
+        with builder.client.driver.session() as session:
+            # Update Paper node with stance_label and methodology_quality
+            session.run(
+                """
+                MATCH (p:Paper {title: $title})
+                SET p.stance_label = $stance_label,
+                    p.methodology_quality = $method_quality,
+                    p.methodological_quality = $method_quality
+                """,
+                title=parsed.title,
+                stance_label=stance_label,
+                method_quality=method_quality
+            )
+
+            # Update Claim nodes with their embeddings
+            for claim in claims:
+                emb = getattr(claim, "embedding", None)
+                if emb is not None:
+                    session.run(
+                        """
+                        MATCH (c:Claim {text: $text})
+                        SET c.embedding = $embedding
+                        """,
+                        text=claim.text,
+                        embedding=emb
+                    )
+    except Exception as exc:
+        logger.warning("Graph post-processing failed: %s", exc)
 
 
 def _build_paper_response(parsed, review, claims) -> PaperAnalysisResponse:
@@ -61,7 +128,9 @@ def _build_paper_response(parsed, review, claims) -> PaperAnalysisResponse:
 
 def _safe_update_graph(parsed, claims, review):
     try:
-        get_graph_builder().build_graph(parsed, claims, review)
+        builder = get_graph_builder()
+        builder.build_graph(parsed, claims, review)
+        _post_process_graph(parsed, claims, review, builder)
     except Exception as exc:
         logger.warning("Graph update failed: %s", exc)
 
@@ -100,8 +169,28 @@ async def analyze_enriched(request: PaperParseRequest) -> dict:
     review = agent_coordinator.review_paper(parsed, claims)
     base_response = _build_paper_response(parsed, review, claims)
 
-    enriched = get_enriched_analyzer().build_enriched_output(parsed, claims, review, base_response)
     _safe_update_graph(parsed, claims, review)
+    
+    enriched = get_enriched_analyzer().build_enriched_output(
+        parsed, claims, review, base_response, graph_client=get_graph_builder().client
+    )
+    return enriched
+
+
+@router.post("/analyze/relational", tags=["Analysis"])
+async def analyze_relational(request: PaperParseRequest) -> dict:
+    """Comprehensive multi-stage analysis with Relational Paper Analysis (RPA)."""
+    parsed = encoder.parse_document(request)
+    claims = get_claim_extractor().extract_claims(parsed)
+    review = agent_coordinator.review_paper(parsed, claims)
+    base_response = _build_paper_response(parsed, review, claims)
+
+    _safe_update_graph(parsed, claims, review)
+
+    enriched = get_enriched_analyzer().build_enriched_output(
+        parsed, claims, review, base_response, graph_client=get_graph_builder().client
+    )
+
     return enriched
 
 

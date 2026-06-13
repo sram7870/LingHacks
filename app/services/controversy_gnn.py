@@ -118,15 +118,27 @@ class ControversyGraphBuilder:
         except Exception as exc:
             logger.warning("ControversyGraphBuilder failed to initialize, falling back: %s", exc)
             self.gnn = None
-        self.node_features = {}
-        self.edge_indices = {}
+        
+        self.node_features = {}  # (node_type, node_id) -> features
+        self.edge_indices = {}   # (src_type, rel, dst_type) -> List[Tuple[src_id, dst_id]]
+        self.id_maps = {}        # node_type -> {node_id -> index}
+
+    def _get_index(self, node_type: str, node_id: str) -> int:
+        """Get or create index for a node ID."""
+        if node_type not in self.id_maps:
+            self.id_maps[node_type] = {}
+        if node_id not in self.id_maps[node_type]:
+            self.id_maps[node_type][node_id] = len(self.id_maps[node_type])
+        return self.id_maps[node_type][node_id]
 
     def add_paper_node(self, paper_id: str, features: np.ndarray) -> None:
         """Add a paper node with features."""
+        idx = self._get_index("paper", paper_id)
         self.node_features[("paper", paper_id)] = torch.tensor(features, dtype=torch.float32)
 
     def add_claim_node(self, claim_id: str, features: np.ndarray) -> None:
         """Add a claim node with features."""
+        idx = self._get_index("claim", claim_id)
         self.node_features[("claim", claim_id)] = torch.tensor(features, dtype=torch.float32)
 
     def add_citation_edge(self, from_paper: str, to_paper: str) -> None:
@@ -152,6 +164,9 @@ class ControversyGraphBuilder:
             x_dict = self._build_node_dict()
             edge_index_dict = self._build_edge_dict()
 
+            if not x_dict or not edge_index_dict:
+                return self._fallback_prediction()
+
             with torch.no_grad():
                 output = self.gnn(x_dict, edge_index_dict)
 
@@ -163,20 +178,27 @@ class ControversyGraphBuilder:
                 "consensus_score": round(consensus, 3),
                 "emerging_topic_score": round(1.0 - consensus, 3),
             }
-        except Exception:
+        except Exception as exc:
+            logger.warning("GNN prediction failed: %s", exc)
             return self._fallback_prediction()
 
     def _build_node_dict(self) -> Dict:
         """Build node feature dictionary for GNN."""
         node_dict = {}
-        for (node_type, node_id), features in self.node_features.items():
-            if node_type not in node_dict:
-                node_dict[node_type] = []
-            node_dict[node_type].append(features)
-
-        for node_type in node_dict:
-            if node_dict[node_type]:
-                node_dict[node_type] = torch.stack(node_dict[node_type])
+        for node_type, id_map in self.id_maps.items():
+            indices = sorted(id_map.values())
+            # Map index back to features
+            rev_map = {idx: nid for nid, idx in id_map.items()}
+            features_list = []
+            for idx in indices:
+                nid = rev_map[idx]
+                feat = self.node_features.get((node_type, nid))
+                if feat is None:
+                    feat = torch.zeros(128, dtype=torch.float32)
+                features_list.append(feat)
+            
+            if features_list:
+                node_dict[node_type] = torch.stack(features_list)
             else:
                 node_dict[node_type] = torch.zeros((1, 128), dtype=torch.float32)
 
@@ -185,12 +207,19 @@ class ControversyGraphBuilder:
     def _build_edge_dict(self) -> Dict:
         """Build edge index dictionary for GNN."""
         edge_dict = {}
-        for edge_key, edges in self.edge_indices.items():
+        for (src_type, rel, dst_type), edges in self.edge_indices.items():
             if not edges:
                 continue
-            edge_indices = list(zip(*edges))
-            if len(edge_indices) == 2:
-                edge_dict[edge_key] = torch.tensor(edge_indices, dtype=torch.long)
+            
+            indices = []
+            for src_id, dst_id in edges:
+                src_idx = self._get_index(src_type, src_id)
+                dst_idx = self._get_index(dst_type, dst_id)
+                indices.append([src_idx, dst_idx])
+            
+            if indices:
+                # [2, num_edges]
+                edge_dict[(src_type, rel, dst_type)] = torch.tensor(indices, dtype=torch.long).t().contiguous()
 
         return edge_dict
 
