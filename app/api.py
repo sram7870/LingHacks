@@ -1,3 +1,5 @@
+import torch
+import numpy as np
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from app.schemas import PaperAnalysisResponse, PaperParseRequest
 from app.services.agent_review import AgentReviewCoordinator
@@ -13,6 +15,68 @@ claim_extractor = ClaimExtractor()
 agent_coordinator = AgentReviewCoordinator()
 graph_builder = KnowledgeGraphBuilder()
 enriched_analyzer = EnrichedPaperAnalysis()
+
+
+# Override/wrap claim extractor to generate and attach embeddings to Claims
+original_extract_claims = claim_extractor.extract_claims
+
+def wrapped_extract_claims(document) -> list:
+    claims = original_extract_claims(document)
+    claim_extractor._initialize_model()
+    for claim in claims:
+        tokens = claim_extractor.tokenizer(claim.text, truncation=True, max_length=128, return_tensors="pt")
+        with torch.no_grad():
+            output = claim_extractor.model(**tokens)
+        if hasattr(output, "pooler_output") and output.pooler_output is not None:
+            emb = output.pooler_output
+        else:
+            emb = output.last_hidden_state[:, 0, :]
+        # Convert to a list of floats
+        claim.embedding = emb[0].cpu().numpy().tolist()
+    return claims
+
+claim_extractor.extract_claims = wrapped_extract_claims
+
+
+def _post_process_graph(parsed, claims, review, builder):
+    # Determine stance label
+    stance_dict = getattr(review, "stance", {})
+    stance_label = "neutral"
+    if stance_dict:
+        max_key = max(stance_dict, key=lambda k: stance_dict.get(k, 0.0))
+        if max_key == "PTLDS":
+            stance_label = "supporting"
+        elif max_key == "CLD":
+            stance_label = "opposing"
+
+    method_quality = getattr(review, "method_quality", 0.0)
+
+    with builder.client.driver.session() as session:
+        # Update Paper node with stance_label and methodology_quality
+        session.run(
+            """
+            MATCH (p:Paper {title: $title})
+            SET p.stance_label = $stance_label,
+                p.methodology_quality = $method_quality,
+                p.methodological_quality = $method_quality
+            """,
+            title=parsed.title,
+            stance_label=stance_label,
+            method_quality=method_quality
+        )
+        
+        # Update Claim nodes with their embeddings
+        for claim in claims:
+            emb = getattr(claim, "embedding", None)
+            if emb is not None:
+                session.run(
+                    """
+                    MATCH (c:Claim {text: $text})
+                    SET c.embedding = $embedding
+                    """,
+                    text=claim.text,
+                    embedding=emb
+                )
 
 
 def _build_paper_response(parsed, review, claims) -> PaperAnalysisResponse:
@@ -37,6 +101,7 @@ async def parse_paper(request: PaperParseRequest) -> PaperAnalysisResponse:
     claims = claim_extractor.extract_claims(parsed)
     review = agent_coordinator.review_paper(parsed, claims)
     graph_builder.build_graph(parsed, claims, review)
+    _post_process_graph(parsed, claims, review, graph_builder)
     return _build_paper_response(parsed, review, claims)
 
 
@@ -54,6 +119,7 @@ async def upload_paper(file: UploadFile = File(...)) -> PaperAnalysisResponse:
     claims = claim_extractor.extract_claims(parsed)
     review = agent_coordinator.review_paper(parsed, claims)
     graph_builder.build_graph(parsed, claims, review)
+    _post_process_graph(parsed, claims, review, graph_builder)
     return _build_paper_response(parsed, review, claims)
 
 
@@ -65,8 +131,34 @@ async def analyze_enriched(request: PaperParseRequest) -> dict:
     review = agent_coordinator.review_paper(parsed, claims)
     base_response = _build_paper_response(parsed, review, claims)
     
-    enriched = enriched_analyzer.build_enriched_output(parsed, claims, review, base_response)
     graph_builder.build_graph(parsed, claims, review)
+    _post_process_graph(parsed, claims, review, graph_builder)
+    
+    enriched = enriched_analyzer.build_enriched_output(
+        parsed, claims, review, base_response, graph_client=graph_builder.client
+    )
+    return enriched
+
+
+@router.post("/analyze/relational", tags=["Analysis"])
+async def analyze_relational(request: PaperParseRequest) -> dict:
+    """Comprehensive multi-stage analysis with Relational Paper Analysis (RPA)."""
+    parsed = encoder.parse_document(request)
+    claims = claim_extractor.extract_claims(parsed)
+    review = agent_coordinator.review_paper(parsed, claims)
+    base_response = _build_paper_response(parsed, review, claims)
+    
+    # 1. Run graph builder to insert the paper and claims into Neo4j
+    graph_builder.build_graph(parsed, claims, review)
+    
+    # 2. Run post-processing to update stance_label and claim embeddings
+    _post_process_graph(parsed, claims, review, graph_builder)
+    
+    # 3. Call build_enriched_output, passing the graph_client
+    enriched = enriched_analyzer.build_enriched_output(
+        parsed, claims, review, base_response, graph_client=graph_builder.client
+    )
+    
     return enriched
 
 
