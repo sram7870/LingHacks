@@ -1,13 +1,27 @@
 from typing import Dict, List, Optional, Tuple
+import logging
 import torch
 import torch.nn as nn
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 try:
     from torch_geometric.nn import HeteroConv, GATConv
     from torch_geometric.data import HeteroData
-    HAS_PYTORCH_GEOMETRIC = True
-except ImportError:
+
+    try:
+        HeteroConv({
+            ("paper", "cites", "paper"): GATConv((-1, -1), 16, add_self_loops=False),
+            ("paper", "contains", "claim"): GATConv((-1, -1), 16, add_self_loops=False),
+            ("claim", "from", "paper"): GATConv((-1, -1), 16, add_self_loops=False),
+        }, aggr="mean")
+        HAS_PYTORCH_GEOMETRIC = True
+    except Exception as exc:
+        logger.warning("Torch Geometric installed but incompatible: %s", exc)
+        HAS_PYTORCH_GEOMETRIC = False
+except Exception as exc:
+    logger.warning("Torch Geometric import failed: %s", exc)
     HAS_PYTORCH_GEOMETRIC = False
 
 
@@ -18,34 +32,46 @@ class ControversyGNN(nn.Module):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        self.layers = None
+        self.controversy_head = None
+        self.consensus_head = None
+        self.initialized = False
 
         if HAS_PYTORCH_GEOMETRIC:
-            self.layers = nn.ModuleList([
-                HeteroConv({
-                    ("paper", "cites", "paper"): GATConv((-1, -1), hidden_dim),
-                    ("paper", "contains", "claim"): GATConv((-1, -1), hidden_dim),
-                    ("claim", "from", "paper"): GATConv((-1, -1), hidden_dim),
-                }, aggr="mean")
-                for _ in range(num_layers)
-            ])
+            try:
+                self.layers = nn.ModuleList([
+                    HeteroConv({
+                        ("paper", "cites", "paper"): GATConv((-1, -1), hidden_dim, add_self_loops=False),
+                        ("paper", "contains", "claim"): GATConv((-1, -1), hidden_dim, add_self_loops=False),
+                        ("claim", "from", "paper"): GATConv((-1, -1), hidden_dim, add_self_loops=False),
+                    }, aggr="mean")
+                    for _ in range(num_layers)
+                ])
 
-            self.controversy_head = nn.Sequential(
-                nn.Linear(hidden_dim, 64),
-                nn.ReLU(),
-                nn.Linear(64, 32),
-                nn.ReLU(),
-                nn.Linear(32, 1),
-                nn.Sigmoid(),
-            )
+                self.controversy_head = nn.Sequential(
+                    nn.Linear(hidden_dim, 64),
+                    nn.ReLU(),
+                    nn.Linear(64, 32),
+                    nn.ReLU(),
+                    nn.Linear(32, 1),
+                    nn.Sigmoid(),
+                )
 
-            self.consensus_head = nn.Sequential(
-                nn.Linear(hidden_dim, 64),
-                nn.ReLU(),
-                nn.Linear(64, 32),
-                nn.ReLU(),
-                nn.Linear(32, 1),
-                nn.Sigmoid(),
-            )
+                self.consensus_head = nn.Sequential(
+                    nn.Linear(hidden_dim, 64),
+                    nn.ReLU(),
+                    nn.Linear(64, 32),
+                    nn.ReLU(),
+                    nn.Linear(32, 1),
+                    nn.Sigmoid(),
+                )
+                self.initialized = True
+            except Exception as exc:
+                logger.warning("Failed to initialize ControversyGNN, falling back to deterministic behavior: %s", exc)
+                self.layers = None
+                self.controversy_head = None
+                self.consensus_head = None
+                self.initialized = False
 
     def forward(self, x_dict: Dict, edge_index_dict: Dict) -> Dict[str, torch.Tensor]:
         """Forward pass on heterogeneous graph."""
@@ -84,7 +110,14 @@ class ControversyGraphBuilder:
     """Build and manage a heterogeneous graph for controversy analysis."""
 
     def __init__(self):
-        self.gnn = ControversyGNN() if HAS_PYTORCH_GEOMETRIC else None
+        try:
+            self.gnn = ControversyGNN() if HAS_PYTORCH_GEOMETRIC else None
+            if self.gnn is not None and not self.gnn.initialized:
+                logger.warning("ControversyGNN fallback active because initialization did not complete successfully.")
+                self.gnn = None
+        except Exception as exc:
+            logger.warning("ControversyGraphBuilder failed to initialize, falling back: %s", exc)
+            self.gnn = None
         self.node_features = {}
         self.edge_indices = {}
 

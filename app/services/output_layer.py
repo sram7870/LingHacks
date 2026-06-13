@@ -1,11 +1,14 @@
 from typing import Any, Dict, List, Optional
 from datetime import datetime
+import logging
 import numpy as np
 
 from app.schemas import Claim, PaperAnalysisResponse
 from app.services.document_encoder import ParsedDocument
 from app.services.semantic_evolution import SemanticEvolution
 from app.services.controversy_gnn import ControversyGraphBuilder
+
+logger = logging.getLogger(__name__)
 
 
 class EnrichedPaperAnalysis:
@@ -21,7 +24,6 @@ class EnrichedPaperAnalysis:
         claims: List[Claim],
         review_result: Any,
         base_response: PaperAnalysisResponse,
-        graph_client: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Construct a rich, multi-layered analysis response."""
         year = datetime.now().year
@@ -48,7 +50,7 @@ class EnrichedPaperAnalysis:
         # Semantic drift analysis
         semantic_drift = self.semantic_evolution.compute_semantic_drift("lyme_disease")
 
-        output = {
+        return {
             "paper": {
                 "title": parsed.title,
                 "abstract": parsed.abstract,
@@ -94,48 +96,6 @@ class EnrichedPaperAnalysis:
                 "timestamp": datetime.now().isoformat(),
             },
         }
-
-        # Relational Paper Analysis (RPA)
-        from app.services.relational_analysis import RelationalAnalyzer
-        
-        stance_dict = getattr(review_result, "stance", {})
-        stance_label = "neutral"
-        if stance_dict:
-            max_key = max(stance_dict, key=lambda k: stance_dict.get(k, 0.0))
-            if max_key == "PTLDS":
-                stance_label = "supporting"
-            elif max_key == "CLD":
-                stance_label = "opposing"
-
-        if graph_client is None:
-            from app.db.graph import KnowledgeGraphClient
-            graph_client = KnowledgeGraphClient()
-
-        analyzer = RelationalAnalyzer(
-            graph_client=graph_client,
-            gnn_model=self.gnn_builder.gnn,
-            evolution_tracker=self.semantic_evolution
-        )
-
-        paper_id = parsed.metadata.get("id") if (hasattr(parsed, "metadata") and parsed.metadata) else None
-        if not paper_id:
-            paper_id = parsed.title
-
-        paper_year = parsed.metadata.get("year") if (hasattr(parsed, "metadata") and parsed.metadata) else None
-        if not paper_year:
-            paper_year = year
-
-        rpa_result = analyzer.analyze(
-            paper_id=str(paper_id),
-            paper_title=parsed.title,
-            paper_year=int(paper_year),
-            extracted_claims=claims,
-            methodology_quality=base_response.methodological_quality,
-            stance_label=stance_label
-        )
-
-        output["relational_analysis"] = rpa_result
-        return output
 
     def build_controversy_map(
         self,

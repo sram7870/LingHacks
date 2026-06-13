@@ -1,7 +1,11 @@
+import logging
+
 from app.services.document_encoder import ParsedDocument
 from app.schemas import Claim
 from app.db.graph import KnowledgeGraphClient
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class KnowledgeGraphBuilder:
@@ -9,25 +13,33 @@ class KnowledgeGraphBuilder:
         self.client = KnowledgeGraphClient()
 
     def build_graph(self, document: ParsedDocument, claims: list[Claim], review_result):
-        self.client.create_paper_node(document, review_result)
-        self.client.detach_all_paper_relationships(document)
+        if not self.client.available:
+            logger.info("Neo4j unavailable; skipping graph construction for %s", document.title)
+            return {"status": "graph_skipped"}
 
-        for claim in claims:
-            self.client.create_claim_node(claim)
-            self.client.create_supports_relationship(document, claim)
+        try:
+            self.client.create_paper_node(document, review_result)
+            self.client.detach_all_paper_relationships(document)
 
-        self.client.create_method_node(document, review_result)
-        self.client.create_method_relationship(document, review_result)
+            for claim in claims:
+                self.client.create_claim_node(claim)
+                self.client.create_supports_relationship(document, claim)
 
-        for citation_text in document.citations:
-            citation_id = self.client.create_citation_node(citation_text)
-            self.client.create_cites_relationship(document, citation_id)
+            self.client.create_method_node(document, review_result)
+            self.client.create_method_relationship(document, review_result)
 
-        # Create temporal snapshot with embedding metadata
-        embedding_summary = {
-            "topic": "lyme_disease",
-            "embedding_norm": round(float(np.linalg.norm(np.random.randn(384))), 3),
-        }
-        self.client.create_temporal_node(document, 2026, embedding_summary)
+            for citation_text in document.citations:
+                citation_id = self.client.create_citation_node(citation_text)
+                self.client.create_cites_relationship(document, citation_id)
 
-        return {"status": "graph_updated"}
+            # Create temporal snapshot with embedding metadata
+            embedding_summary = {
+                "topic": "lyme_disease",
+                "embedding_norm": round(float(np.linalg.norm(np.random.randn(384))), 3),
+            }
+            self.client.create_temporal_node(document, 2026, embedding_summary)
+
+            return {"status": "graph_updated"}
+        except Exception as exc:
+            logger.warning("Graph construction error: %s", exc)
+            return {"status": "graph_failed"}

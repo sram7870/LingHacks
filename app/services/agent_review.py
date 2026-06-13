@@ -153,15 +153,15 @@ class ConsensusAgent:
 
 
 class AgentReviewCoordinator:
-    def __init__(self, use_ensemble: bool = False):
+    def __init__(self, use_ensemble: bool | None = None):
         self.stance_agent = StanceAgent()
         self.skeptic_agent = SkepticAgent()
         self.methods_agent = MethodsAgent()
         self.consensus_agent = ConsensusAgent()
-        self.use_ensemble = use_ensemble
+        self.use_ensemble = settings.use_ensemble_llm if use_ensemble is None else use_ensemble
         self.ensemble_orchestrator = None
 
-        if use_ensemble:
+        if self.use_ensemble:
             try:
                 from app.services.ensemble_review import EnsembleOrchestrator, EnsembleConfig
                 from app.services.llm_adapters import GPTAdapter, ClaudeAdapter
