@@ -29,3 +29,6 @@ uvicorn app.main:app --reload --port 8000
 - Add SciBERT claim extraction and LLM verification
 - Build the multi-agent review orchestration layer
 - Connect the knowledge graph builder to Neo4j
+
+#Inspiration Paper
+`https://link.springer.com/article/10.1007/s11192-026-05681-3#Fun`
