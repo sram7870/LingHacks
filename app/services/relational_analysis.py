@@ -1,9 +1,12 @@
 import math
+import logging
 from typing import Dict, List, Optional, Any
 import numpy as np
 
 from app.schemas import RelationalAnalysisResult, ClaimCAS, ClaimCNS
 from app.services.controversy_gnn import ControversyGraphBuilder
+
+logger = logging.getLogger(__name__)
 
 
 class RelationalAnalyzer:
@@ -24,6 +27,25 @@ class RelationalAnalyzer:
         self.graph_client = graph_client
         self.gnn_model = gnn_model
         self.evolution_tracker = evolution_tracker
+        self.landscape_paper_titles = None
+
+    def _get_total_papers_count(self) -> int:
+        """Count the total number of Paper nodes currently stored in Neo4j (filtered by landscape if provided)."""
+        if self.graph_client is None or not getattr(self.graph_client, "available", False):
+            logger.warning("Neo4j client unavailable during paper count.")
+            return 0
+
+        try:
+            with self.graph_client.driver.session() as session:
+                if self.landscape_paper_titles:
+                    res = session.run("MATCH (p:Paper) WHERE p.title IN $titles RETURN count(p) AS count", titles=self.landscape_paper_titles)
+                else:
+                    res = session.run("MATCH (p:Paper) RETURN count(p) AS count")
+                single = res.single()
+                return single["count"] if single else 0
+        except Exception as exc:
+            logger.error("Failed to count papers in Neo4j: %s", exc)
+            return 0
 
     def analyze(
         self,
@@ -31,27 +53,22 @@ class RelationalAnalyzer:
         paper_title: str,
         paper_year: int,
         extracted_claims: List[Any],
-        # each claim: Claim object or dict containing {text, embedding, confidence, polarity}
         methodology_quality: float,
         stance_label: str,
+        landscape_paper_titles: Optional[List[str]] = None,
     ) -> RelationalAnalysisResult:
-        """
-        Run the multi-metric Relational Paper Analysis pipeline.
+        self.landscape_paper_titles = landscape_paper_titles
+        claim_dicts = [self._claim_to_dict(claim) for claim in extracted_claims]
 
-        Args:
-            paper_id: Identifier of the paper.
-            paper_title: Title of the paper.
-            paper_year: Publication year of the paper.
-            extracted_claims: List of claims extracted from the paper.
-            methodology_quality: Methodology quality score (0.0 to 1.0).
-            stance_label: Stance classification label ('supporting', 'opposing', 'neutral').
-
-        Returns:
-            RelationalAnalysisResult: Pydantic model with all relational metrics.
-        """
-        # Check if the corpus has fewer than 10 papers total
+        # Check if the corpus (or landscape) has fewer than 2 papers total
         total_papers = self._get_total_papers_count()
-        if total_papers < 10:
+        
+        if total_papers < 2:
+            diag_msg = f"Insufficient data: found only {total_papers} papers in "
+            diag_msg += f"landscape (filtered from {len(landscape_paper_titles) if landscape_paper_titles else 'global'}) "
+            diag_msg += "matching the selected criteria in the knowledge graph. "
+            diag_msg += "Ensure papers are analyzed on the homepage first."
+            
             return RelationalAnalysisResult(
                 paper_id=paper_id,
                 paper_title=paper_title,
@@ -78,33 +95,24 @@ class RelationalAnalyzer:
                 papers_published_same_period=None,
                 drift_velocity_at_publication=None,
                 corpus_too_small=True,
-                message="Insufficient data: the corpus has fewer than 10 papers total."
+                message=diag_msg
             )
 
-        # Normalize extracted_claims to a list of dicts
-        normalized_claims = []
-        for claim in extracted_claims:
-            if hasattr(claim, "text"):  # Claim Pydantic object
-                normalized_claims.append({
-                    "text": claim.text,
-                    "embedding": getattr(claim, "embedding", None),
-                    "confidence": getattr(claim, "confidence", 0.5),
-                    "polarity": getattr(claim, "polarity", "neutral")
-                })
-            elif isinstance(claim, dict):
-                normalized_claims.append({
-                    "text": claim.get("text", ""),
-                    "embedding": claim.get("embedding", None),
-                    "confidence": claim.get("confidence", 0.5),
-                    "polarity": claim.get("polarity", "neutral")
-                })
-
-        # Run pipelines for each metric
-        cas = self._compute_cas(normalized_claims, paper_title)
-        fci = self._compute_fci(paper_id, paper_title, stance_label)
-        mss = self._compute_mss(paper_id, paper_title, methodology_quality, stance_label, normalized_claims)
-        cns = self._compute_cns(normalized_claims, paper_title, cas["per_claim_cas"])
-        tfp = self._compute_tfp(paper_id, paper_title, paper_year, stance_label)
+        try:
+            cas = self._compute_cas(claim_dicts, paper_title)
+            fci = self._compute_fci(paper_id, paper_title, stance_label)
+            mss = self._compute_mss(paper_id, paper_title, methodology_quality, stance_label, claim_dicts)
+            cns = self._compute_cns(claim_dicts, paper_title, cas["per_claim_cas"])
+            tfp = self._compute_tfp(paper_id, paper_title, paper_year, stance_label)
+        except Exception as exc:
+            logger.exception("Relational analysis failed for %s", paper_title)
+            return RelationalAnalysisResult(
+                paper_id=paper_id,
+                paper_title=paper_title,
+                publication_year=paper_year,
+                corpus_too_small=False,
+                message=f"Relational analysis failed: {exc}",
+            )
 
         return RelationalAnalysisResult(
             paper_id=paper_id,
@@ -132,18 +140,22 @@ class RelationalAnalyzer:
             papers_published_same_period=tfp["papers_published_same_period"],
             drift_velocity_at_publication=tfp["drift_velocity_at_publication"],
             corpus_too_small=False,
-            message=None
+            message=None,
         )
 
-    def _get_total_papers_count(self) -> int:
-        """Count the total number of Paper nodes currently stored in Neo4j."""
-        if self.graph_client is None or not getattr(self.graph_client, "available", False):
-            return 0
-
-        with self.graph_client.driver.session() as session:
-            res = session.run("MATCH (p:Paper) RETURN count(p) AS count")
-            single = res.single()
-            return single["count"] if single else 0
+    def _claim_to_dict(self, claim: Any) -> Dict[str, Any]:
+        if isinstance(claim, dict):
+            return claim
+        if hasattr(claim, "model_dump"):
+            return claim.model_dump()
+        if hasattr(claim, "dict"):
+            return claim.dict()
+        return {
+            "text": getattr(claim, "text", ""),
+            "polarity": getattr(claim, "polarity", "neutral"),
+            "confidence": getattr(claim, "confidence", 0.0),
+            "embedding": getattr(claim, "embedding", None),
+        }
 
     def _compute_cas(self, extracted_claims: List[dict], input_title: str, K: int = 20) -> dict:
         """
@@ -152,16 +164,20 @@ class RelationalAnalyzer:
         """
         with self.graph_client.driver.session() as session:
             # Query all claims from other papers that have embeddings
-            res = session.run(
-                """
+            query = """
                 MATCH (p:Paper)-[:SUPPORTED_BY|MAKES_CLAIM]-(c:Claim)
                 WHERE p.title <> $input_title AND c.embedding IS NOT NULL
+            """
+            if self.landscape_paper_titles:
+                query += " AND p.title IN $titles"
+            
+            query += """
                 RETURN DISTINCT c.text AS text, c.embedding AS embedding,
                                 p.stance_label AS stance_label,
                                 COALESCE(p.methodology_quality, p.methodological_quality, 0.5) AS method_quality
-                """,
-                input_title=input_title
-            )
+            """
+            
+            res = session.run(query, input_title=input_title, titles=self.landscape_paper_titles)
             existing_claims = []
             for record in res:
                 existing_claims.append({
@@ -267,15 +283,17 @@ class RelationalAnalyzer:
         """
         with self.graph_client.driver.session() as session:
             # Query paper nodes within 2 hops
-            res_papers = session.run(
-                """
+            query_papers = """
                 MATCH (p:Paper {title: $title})
                 OPTIONAL MATCH (p)-[:SUPPORTED_BY|CITES|USES_METHOD*..2]-(other:Paper)
                 WHERE other <> p
-                RETURN DISTINCT other.title AS title, other.stance_label AS stance_label
-                """,
-                title=paper_title
-            )
+            """
+            if self.landscape_paper_titles:
+                query_papers += " AND other.title IN $titles"
+            
+            query_papers += " RETURN DISTINCT other.title AS title, other.stance_label AS stance_label"
+            
+            res_papers = session.run(query_papers, title=paper_title, titles=self.landscape_paper_titles)
             subgraph_papers = [{"title": paper_title, "stance_label": stance_label}]
             for record in res_papers:
                 if record["title"] is not None:
@@ -285,15 +303,19 @@ class RelationalAnalyzer:
                     })
 
             # Query claim nodes in the subgraph
-            res_claims = session.run(
-                """
+            query_claims = """
                 MATCH (p:Paper)-[:SUPPORTED_BY|MAKES_CLAIM]-(c:Claim)
-                WHERE p.title = $title OR (p)-[:SUPPORTED_BY|CITES|USES_METHOD*..2]-(:Paper {title: $title})
+                WHERE (p.title = $title OR (p)-[:SUPPORTED_BY|CITES|USES_METHOD*..2]-(:Paper {title: $title}))
+            """
+            if self.landscape_paper_titles:
+                query_claims += " AND p.title IN ($titles + [$title])"
+            
+            query_claims += """
                 RETURN DISTINCT p.title AS paper_title, c.text AS claim_text,
                                 COALESCE(c.confidence, 0.5) AS confidence
-                """,
-                title=paper_title
-            )
+            """
+            
+            res_claims = session.run(query_claims, title=paper_title, titles=self.landscape_paper_titles)
             subgraph_claims = []
             for record in res_claims:
                 subgraph_claims.append({
@@ -303,16 +325,20 @@ class RelationalAnalyzer:
                 })
 
             # Count contradictions and supports edges
-            res_edges = session.run(
-                """
+            query_edges = """
                 MATCH (p:Paper)-[:SUPPORTED_BY|MAKES_CLAIM]-(c:Claim)
-                WHERE p.title = $title OR (p)-[:SUPPORTED_BY|CITES|USES_METHOD*..2]-(:Paper {title: $title})
+                WHERE (p.title = $title OR (p)-[:SUPPORTED_BY|CITES|USES_METHOD*..2]-(:Paper {title: $title}))
+            """
+            if self.landscape_paper_titles:
+                query_edges += " AND p.title IN ($titles + [$title])"
+                
+            query_edges += """
                 WITH DISTINCT c
                 MATCH (c)-[r:CONTRADICTS|SUPPORTS]-(other:Claim)
                 RETURN type(r) AS rel_type, count(r) AS count
-                """,
-                title=paper_title
-            )
+            """
+            
+            res_edges = session.run(query_edges, title=paper_title, titles=self.landscape_paper_titles)
             contradicts_count = 0
             supports_count = 0
             for record in res_edges:
@@ -322,16 +348,18 @@ class RelationalAnalyzer:
                     supports_count += record["count"]
 
             # Query paper-to-paper citations (via shared Citation nodes)
-            res_citations = session.run(
-                """
+            query_citations = """
                 MATCH (p1:Paper)-[:CITES]->(c:Citation)<-[:CITES]-(p2:Paper)
                 WHERE p1 <> p2 AND
                       (p1.title = $title OR (p1)-[:SUPPORTED_BY|CITES|USES_METHOD*..2]-(:Paper {title: $title})) AND
                       (p2.title = $title OR (p2)-[:SUPPORTED_BY|CITES|USES_METHOD*..2]-(:Paper {title: $title}))
-                RETURN DISTINCT p1.title AS from_title, p2.title AS to_title
-                """,
-                title=paper_title
-            )
+            """
+            if self.landscape_paper_titles:
+                query_citations += " AND p1.title IN ($titles + [$title]) AND p2.title IN ($titles + [$title])"
+            
+            query_citations += " RETURN DISTINCT p1.title AS from_title, p2.title AS to_title"
+            
+            res_citations = session.run(query_citations, title=paper_title, titles=self.landscape_paper_titles)
             citations = []
             for record in res_citations:
                 citations.append((record["from_title"], record["to_title"]))
@@ -412,17 +440,21 @@ class RelationalAnalyzer:
         """
         with self.graph_client.driver.session() as session:
             # Query papers connected via Claim supports/contradicts relationships
-            res_conn = session.run(
-                """
+            query_conn = """
                 MATCH (p1:Paper {title: $title})-[r1:SUPPORTED_BY|MAKES_CLAIM]-(c1:Claim)-[r:SUPPORTS|CONTRADICTS]-(c2:Claim)-[r2:SUPPORTED_BY|MAKES_CLAIM]-(p2:Paper)
                 WHERE p2 <> p1
+            """
+            if self.landscape_paper_titles:
+                query_conn += " AND p2.title IN $titles"
+            
+            query_conn += """
                 RETURN DISTINCT p2.title AS title,
                                 COALESCE(p2.methodology_quality, p2.methodological_quality, 0.5) AS methodology_quality,
                                 p2.stance_label AS stance_label,
                                 type(r) AS rel_type
-                """,
-                title=paper_title
-            )
+            """
+            
+            res_conn = session.run(query_conn, title=paper_title, titles=self.landscape_paper_titles)
             connected_papers = {}
             for record in res_conn:
                 title = record["title"]
@@ -434,17 +466,21 @@ class RelationalAnalyzer:
                 }
 
             # Query all claims from other papers to find semantically similar ones
-            res_all_claims = session.run(
-                """
+            query_all = """
                 MATCH (p:Paper)-[:SUPPORTED_BY|MAKES_CLAIM]-(c:Claim)
                 WHERE p.title <> $title AND c.embedding IS NOT NULL
+            """
+            if self.landscape_paper_titles:
+                query_all += " AND p.title IN $titles"
+                
+            query_all += """
                 RETURN p.title AS title,
                        COALESCE(p.methodology_quality, p.methodological_quality, 0.5) AS methodology_quality,
                        p.stance_label AS stance_label,
                        c.embedding AS embedding
-                """,
-                title=paper_title
-            )
+            """
+            
+            res_all_claims = session.run(query_all, title=paper_title, titles=self.landscape_paper_titles)
 
             paper_max_sims = {}
             for record in res_all_claims:
@@ -547,14 +583,16 @@ class RelationalAnalyzer:
         Quantifies claim novelty relative to other claim embeddings, using FAISS if count exceeds 10,000.
         """
         with self.graph_client.driver.session() as session:
-            res = session.run(
-                """
+            query = """
                 MATCH (p:Paper)-[:SUPPORTED_BY|MAKES_CLAIM]-(c:Claim)
                 WHERE p.title <> $title AND c.embedding IS NOT NULL
-                RETURN DISTINCT c.text AS text, c.embedding AS embedding
-                """,
-                title=paper_title
-            )
+            """
+            if self.landscape_paper_titles:
+                query += " AND p.title IN $titles"
+                
+            query += " RETURN DISTINCT c.text AS text, c.embedding AS embedding"
+            
+            res = session.run(query, title=paper_title, titles=self.landscape_paper_titles)
             existing_claims = []
             for record in res:
                 existing_claims.append({
@@ -659,16 +697,20 @@ class RelationalAnalyzer:
         """
         with self.graph_client.driver.session() as session:
             # Query sub-graph papers and publication years
-            res = session.run(
-                """
+            query = """
                 MATCH (p:Paper {title: $title})
                 OPTIONAL MATCH (p)-[:SUPPORTED_BY|CITES|USES_METHOD*..2]-(other:Paper)
                 WHERE other <> p
+            """
+            if self.landscape_paper_titles:
+                query += " AND other.title IN $titles"
+            
+            query += """
                 RETURN DISTINCT other.title AS title,
                                 COALESCE(other.year, 2026) AS year
-                """,
-                title=paper_title
-            )
+            """
+            
+            res = session.run(query, title=paper_title, titles=self.landscape_paper_titles)
             subgraph_papers = [{"title": paper_title, "year": paper_year}]
             for record in res:
                 if record["title"] is not None:

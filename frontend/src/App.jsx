@@ -1,5 +1,15 @@
 ﻿import { useEffect, useState } from "react";
-import { analyzeEnriched, analyzeUploadedFile, getControversyMap, getVisualizationData, parsePaper, uploadPaper, visualizeUploadedFile, healthCheck } from "./api";
+import { Link } from "react-router-dom";
+import { 
+  analyzeEnriched, 
+  analyzeUploadedFile, 
+  getControversyMap, 
+  getVisualizationData, 
+  parsePaper, 
+  uploadPaper, 
+  visualizeUploadedFile, 
+  healthCheck 
+} from "./api";
 
 const TABS = [
   { id: "parsed", label: "Parsed Paper" },
@@ -34,10 +44,66 @@ function App() {
   const [backendHealthy, setBackendHealthy] = useState(false);
   const [backendStatus, setBackendStatus] = useState("Checking backend...");
 
+  const [landscapes, setLandscapes] = useState([]);
+  const [selectedLandscape, setSelectedLandscape] = useState("");
+  const [isCreatingLandscape, setIsCreatingLandscape] = useState(false);
+  const [newLandscapeName, setNewLandscapeName] = useState("");
+  const [newLandscapeDesc, setNewLandscapeDesc] = useState("");
+
   useEffect(() => {
     checkBackendHealth();
-    refreshControversy();
+    fetchLandscapes();
   }, []);
+
+  useEffect(() => {
+    refreshControversy();
+  }, [selectedLandscape]);
+
+  const fetchLandscapes = async () => {
+    try {
+      const resp = await fetch("/api/landscapes");
+      const data = await resp.json();
+      setLandscapes(data);
+    } catch (err) {
+      console.warn("Failed to fetch landscapes", err);
+    }
+  };
+
+  const handleCreateLandscape = async () => {
+    if (!newLandscapeName) return;
+    setLoading(true);
+    try {
+      const resp = await fetch(`/api/landscapes?name=${encodeURIComponent(newLandscapeName)}&description=${encodeURIComponent(newLandscapeDesc)}`, { method: "POST" });
+      const data = await resp.json();
+      setNewLandscapeName("");
+      setNewLandscapeDesc("");
+      setIsCreatingLandscape(false);
+      await fetchLandscapes();
+      setSelectedLandscape(data.id);
+      setStatusMessage(`Landscape "${data.name}" created.`);
+    } catch (err) {
+      setError("Failed to create landscape.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAnalyzeLandscape = async () => {
+    if (!selectedLandscape) return;
+    setLoading(true);
+    setStatusMessage("Running full landscape analysis...");
+    try {
+      const resp = await fetch(`/api/landscapes/${selectedLandscape}/analyze`, { method: "POST" });
+      const data = await resp.json();
+      setControversyMap(data);
+      setStatusMessage("Landscape analysis complete.");
+      setActiveTab("controversy");
+    } catch (err) {
+      setError("Failed to analyze landscape.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const checkBackendHealth = async () => {
     try {
@@ -71,11 +137,16 @@ function App() {
     try {
       const form = new FormData();
       for (const f of bulkFiles) form.append('files', f);
-      const resp = await fetch('/api/upload-multiple', { method: 'POST', body: form });
+      // Landscape ID as query param
+      let url = '/api/upload-multiple';
+      if (selectedLandscape) url += `?landscape_id=${selectedLandscape}`;
+      
+      const resp = await fetch(url, { method: 'POST', body: form });
       const data = await resp.json();
       setStatusMessage('Upload complete.');
       setBulkFiles(null);
       fetchUploads();
+      if (selectedLandscape) fetchLandscapes(); // Update paper counts
     } catch (err) {
       setError(err.message || String(err));
     } finally {
@@ -97,9 +168,13 @@ function App() {
   const refreshControversy = async () => {
     setStatusMessage("Refreshing controversy map...");
     try {
-      const map = await getControversyMap();
+      // Use direct fetch to support landscape_id
+      let url = "/api/graph/controversy-map";
+      if (selectedLandscape) url += `?landscape_id=${selectedLandscape}`;
+      const res = await fetch(url);
+      const map = await res.json();
       setControversyMap(map);
-      setStatusMessage("Controversy map updated.");
+      setStatusMessage(selectedLandscape ? "Landscape controversy map updated." : "Global controversy map updated.");
     } catch (err) {
       setError(err.message || String(err));
       setStatusMessage("");
@@ -244,7 +319,14 @@ function App() {
     setStatusMessage("Uploading paper and requesting analysis...");
 
     try {
-      const result = await uploadPaper(selectedFile);
+      const formData = new FormData();
+      formData.append("file", selectedFile);
+      let url = "/api/upload";
+      if (selectedLandscape) url += `?landscape_id=${selectedLandscape}`;
+      
+      const response = await fetch(url, { method: "POST", body: formData });
+      const result = await response.json();
+      
       setAnalysisResult(result);
       setParseResult(null);
       setVisualizationResult(null);
@@ -253,6 +335,7 @@ function App() {
       updateFormFromResponse(result);
       setStatusMessage("File uploaded and analyzed successfully.");
       fetchUploads();
+      if (selectedLandscape) fetchLandscapes();
     } catch (err) {
       setError(err.message || String(err));
       setUploadStatus("");
@@ -544,6 +627,7 @@ function App() {
             <div className="text-sm text-white/80 mt-1">Advanced Scientific Paper Analysis</div>
           </div>
           <div className="flex items-center gap-3">
+            <Link to="/rpa" className="rounded-full border-2 border-white/20 bg-white/10 px-4 py-2 text-sm font-semibold text-white hover:bg-white/20">Relational Analysis</Link>
             <button onClick={() => { setLibraryOpen(true); fetchUploads(); }} className="rounded-full border-2 border-white/20 bg-white/10 px-4 py-2 text-sm font-semibold text-white hover:bg-white/20">Library</button>
           </div>
         </div>
@@ -551,6 +635,47 @@ function App() {
 
       <main className="mx-auto max-w-[1080px] px-6 pb-16">
         <section className="mt-10 rounded-3xl border-2 border-border bg-surface p-8 shadow-lg">
+          <div className="mb-8 flex flex-col gap-6 border-b-2 border-border pb-8">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+              <div className="flex-1">
+                <label className="text-xs font-bold uppercase tracking-[0.2em] text-inkSec">Select Research Landscape</label>
+                <select 
+                  value={selectedLandscape} 
+                  onChange={(e) => setSelectedLandscape(e.target.value)}
+                  className="mt-2 w-full rounded-2xl border-2 border-border bg-white px-4 py-3 text-lg font-bold text-ink outline-none transition focus:border-ink"
+                >
+                  <option value="">Global Literature (All Papers)</option>
+                  {landscapes.map(l => (
+                    <option key={l.id} value={l.id}>{l.name} ({l.paper_ids.length} papers)</option>
+                  ))}
+                  <option value="NEW">+ Create New Landscape</option>
+                </select>
+              </div>
+              <div className="flex gap-3">
+                <button 
+                  onClick={handleAnalyzeLandscape} 
+                  disabled={loading || !selectedLandscape || selectedLandscape === "NEW"} 
+                  className="rounded-2xl bg-ink px-6 py-3 text-sm font-bold text-white shadow-md transition transform hover:scale-105 active:scale-95 disabled:opacity-50"
+                >
+                  Analyze Landscape
+                </button>
+              </div>
+            </div>
+
+            {selectedLandscape === "NEW" && (
+              <div className="rounded-2xl bg-surfaceAlt p-6 space-y-4 animate-in fade-in slide-in-from-top-4">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  {renderTextInput("Landscape Name", newLandscapeName, setNewLandscapeName, "e.g. Chronic Lyme Disease", 1)}
+                  {renderTextInput("Description", newLandscapeDesc, setNewLandscapeDesc, "Topic focus...", 1)}
+                </div>
+                <div className="flex justify-end gap-3">
+                  <button onClick={() => setSelectedLandscape("")} className="px-4 py-2 text-sm font-bold text-inkSec">Cancel</button>
+                  <button onClick={handleCreateLandscape} disabled={!newLandscapeName} className="rounded-xl bg-ink px-6 py-2 text-sm font-bold text-white">Create Landscape</button>
+                </div>
+              </div>
+            )}
+          </div>
+
           <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <h1 className="text-4xl font-bold tracking-tight">Paper Analyzer</h1>

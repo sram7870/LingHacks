@@ -1,6 +1,17 @@
 import React from 'react';
 
-const UploadSection = ({ onUpload, onParse, loading, paperTitle, setPaperTitle, paperSummary, setPaperSummary }) => {
+const UploadSection = ({ 
+  onUpload, 
+  onParse, 
+  loading, 
+  paperTitle, 
+  setPaperTitle, 
+  paperSummary, 
+  setPaperSummary,
+  landscapes = [],
+  selectedLandscape,
+  setSelectedLandscape
+}) => {
   return (
     <div className="mx-auto max-w-4xl space-y-8 py-12">
       <div className="text-center">
@@ -10,27 +21,47 @@ const UploadSection = ({ onUpload, onParse, loading, paperTitle, setPaperTitle, 
         </p>
       </div>
 
+      {/* Landscape Selection */}
+      <div className="rounded-3xl border-2 border-border bg-surface p-8 shadow-sm">
+        <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-[0.2em] text-inkSec">Select Research Landscape</label>
+            <select 
+              value={selectedLandscape || ""} 
+              onChange={(e) => setSelectedLandscape(e.target.value || "")}
+              className="w-full rounded-2xl border-2 border-border bg-white px-6 py-4 text-lg font-bold text-ink outline-none transition focus:border-ink"
+            >
+              <option value="">Choose a saved landscape...</option>
+              {landscapes.map(l => (
+                <option key={l.id} value={l.id}>{l.name} ({l.paper_ids?.length || 0} papers)</option>
+              ))}
+            </select>
+        </div>
+        <p className="mt-4 text-xs text-inkSec italic">
+          RPA compares the uploaded paper against the selected landscape without adding it to that corpus.
+        </p>
+      </div>
+
       <div className="rounded-[32px] border border-border bg-white p-10 shadow-panel">
         <div className="space-y-6">
           <div className="grid gap-6">
             <div className="space-y-2">
-              <label className="text-xs font-bold uppercase tracking-[0.2em] text-inkSec">Paper Title</label>
+              <label className="text-xs font-bold uppercase tracking-[0.2em] text-inkSec">Paper Title (Optional - Extracted from file)</label>
               <input
                 type="text"
                 value={paperTitle}
                 onChange={(e) => setPaperTitle(e.target.value)}
-                placeholder="Enter the full title of the research paper..."
+                placeholder="Enter title or let the AI extract it..."
                 className="w-full rounded-2xl border border-border bg-surfaceAlt px-6 py-4 text-lg font-medium text-ink outline-none transition focus:border-ink focus:bg-white"
               />
             </div>
             
             <div className="space-y-2">
-              <label className="text-xs font-bold uppercase tracking-[0.2em] text-inkSec">Abstract</label>
+              <label className="text-xs font-bold uppercase tracking-[0.2em] text-inkSec">Abstract / Summary</label>
               <textarea
                 value={paperSummary}
                 onChange={(e) => setPaperSummary(e.target.value)}
                 rows={6}
-                placeholder="Paste the paper abstract here for claim extraction and relational mapping..."
+                placeholder="Paste the paper abstract here for claim extraction..."
                 className="w-full rounded-2xl border border-border bg-surfaceAlt px-6 py-4 text-base text-ink outline-none transition focus:border-ink focus:bg-white"
               />
             </div>
@@ -59,10 +90,10 @@ const UploadSection = ({ onUpload, onParse, loading, paperTitle, setPaperTitle, 
 
             <button
               onClick={onParse}
-              disabled={loading || !paperTitle || !paperSummary}
+              disabled={loading}
               className="group relative flex h-14 items-center justify-center gap-3 overflow-hidden rounded-2xl bg-ink px-8 py-4 font-bold text-white transition-all hover:scale-[1.02] active:scale-[0.98] disabled:scale-100 disabled:opacity-50"
             >
-              <span className="relative z-10">Start Relational Analysis</span>
+              <span className="relative z-10">{loading ? "Analyzing..." : "Start Relational Analysis"}</span>
               <svg className="relative z-10 h-5 w-5 transition-transform group-hover:translate-x-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
               </svg>

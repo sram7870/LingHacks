@@ -10,13 +10,9 @@ app = FastAPI(
 )
 
 app.include_router(router)
+app.include_router(router, prefix="/api")
 
 # Serve uploaded files
 uploads_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'uploads'))
 os.makedirs(uploads_path, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=uploads_path), name="uploads")
-
-
-@app.get("/health", tags=["Health"])
-def health_check() -> dict:
-    return {"status": "ok"}

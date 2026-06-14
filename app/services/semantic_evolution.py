@@ -1,10 +1,13 @@
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
+import logging
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from app.core.config import settings
 from app.services.document_encoder import ParsedDocument
+
+logger = logging.getLogger(__name__)
 
 
 class SemanticSnapshot:

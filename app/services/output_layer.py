@@ -11,6 +11,16 @@ from app.services.controversy_gnn import ControversyGraphBuilder
 logger = logging.getLogger(__name__)
 
 
+def _to_jsonable(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if isinstance(value, list):
+        return [_to_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _to_jsonable(item) for key, item in value.items()}
+    return value
+
+
 class EnrichedPaperAnalysis:
     """Rich, multi-layered analysis output with all reasoning layers."""
 
@@ -59,6 +69,18 @@ class EnrichedPaperAnalysis:
                 "title": parsed.title,
                 "abstract": parsed.abstract,
                 "year": year,
+                "authors": parsed.metadata.get("authors") if (hasattr(parsed, "metadata") and parsed.metadata) else [],
+                "sections": parsed.sections,
+                "claims": [
+                    {
+                        "text": claim.text,
+                        "polarity": claim.polarity,
+                        "confidence": claim.confidence,
+                        "section": getattr(claim, "section", None),
+                        "embedding": getattr(claim, "embedding", None),
+                    }
+                    for claim in claims
+                ],
             },
             "analysis": {
                 "stance": base_response.stance,
@@ -77,6 +99,7 @@ class EnrichedPaperAnalysis:
                     "polarity": claim.polarity,
                     "confidence": claim.confidence,
                     "section": getattr(claim, "section", None),
+                    "embedding": getattr(claim, "embedding", None),
                 }
                 for claim in claims
             ],
@@ -150,7 +173,7 @@ class EnrichedPaperAnalysis:
                 stance_label=stance_label
             )
 
-            output["relational_analysis"] = rpa_result
+            output["relational_analysis"] = _to_jsonable(rpa_result)
         
         return output
 

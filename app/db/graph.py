@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime
+from typing import List, Optional
 from app.core.config import settings
 from app.services.document_encoder import ParsedDocument
 from app.schemas import Claim
@@ -171,7 +172,7 @@ class KnowledgeGraphClient:
             id=citation_id,
         )
 
-    def fetch_controversy_map(self) -> dict:
+    def fetch_controversy_map(self, paper_titles: Optional[List[str]] = None) -> dict:
         if not self.available:
             return {
                 "controversy_clusters": {},
@@ -180,11 +181,13 @@ class KnowledgeGraphClient:
                 "unique_clusters": 0,
             }
 
-        result = self._run(
-            "MATCH (p:Paper)"
-            " RETURN p.title AS title, p.year AS year, p.controversy_cluster AS cluster"
-            " ORDER BY p.year, p.title"
-        )
+        if paper_titles:
+            query = "MATCH (p:Paper) WHERE p.title IN $titles RETURN p.title AS title, p.year AS year, p.controversy_cluster AS cluster ORDER BY p.year, p.title"
+            result = self._run(query, titles=paper_titles)
+        else:
+            query = "MATCH (p:Paper) RETURN p.title AS title, p.year AS year, p.controversy_cluster AS cluster ORDER BY p.year, p.title"
+            result = self._run(query)
+
         if result is None:
             return {
                 "controversy_clusters": {},
