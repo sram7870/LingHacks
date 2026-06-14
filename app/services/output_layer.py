@@ -130,6 +130,30 @@ class EnrichedPaperAnalysis:
             },
         }
 
+        # Backwards-compatibility: duplicate common analysis fields at top-level
+        try:
+            output_top = {
+                "title": parsed.title,
+                "abstract": parsed.abstract,
+                "sections": parsed.sections,
+                "claims": output["claims"],
+                # expose common analysis fields at top-level for older clients
+                "stance": output["analysis"].get("stance"),
+                "weaknesses": output["analysis"].get("weaknesses"),
+                "evidence_strength": output["analysis"].get("evidence_strength"),
+                "methodological_quality": output["analysis"].get("methodological_quality"),
+                "uncertainty": output["analysis"].get("uncertainty"),
+                "study_design": output["analysis"].get("study_design"),
+                "sample_size": output["analysis"].get("sample_size"),
+                "controversy_cluster": output["analysis"].get("controversy_cluster"),
+                "citation_role": output.get("citation_context", {}).get("citation_roles") or output["analysis"].get("citation_roles"),
+                "graph_predictions": output.get("graph_predictions"),
+            }
+            output.update(output_top)
+        except Exception:
+            # Non-fatal: continue even if compatibility mapping fails
+            pass
+
         # Relational Paper Analysis (RPA)
         from app.services.relational_analysis import RelationalAnalyzer
 
