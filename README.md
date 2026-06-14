@@ -29,3 +29,30 @@ uvicorn app.main:app --reload --port 8000
 - Add SciBERT claim extraction and LLM verification
 - Build the multi-agent review orchestration layer
 - Connect the knowledge graph builder to Neo4j
+
+## To run the project:
+
+Run Instructions
+
+Prereqs: Ensure Node+npm and Python 3+ are installed. Optional: Neo4j if you want graph features.
+
+Backend (Windows PowerShell):
+
+(If needed) create venv and install deps:
+
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+
+Start the API:
+\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+Frontend:
+
+cd frontend
+npm install      # only if dependencies not installed
+npm run dev
+
+Dev server URL: http://localhost:4173/
+
+Alternative (Docker Compose):
+docker-compose up --build

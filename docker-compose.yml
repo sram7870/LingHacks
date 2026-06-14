@@ -1,0 +1,40 @@
+version: '3.9'
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - '8000:8000'
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - USE_ENSEMBLE_LLM=${USE_ENSEMBLE_LLM:-false}
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=secret
+      - GROBID_URL=http://grobid:8070
+    depends_on:
+      - neo4j
+      - grobid
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+    ports:
+      - '4174:4174'
+    depends_on:
+      - backend
+
+  neo4j:
+    image: neo4j:5.14
+    environment:
+      NEO4J_AUTH=neo4j/secret
+    ports:
+      - '7687:7687'
+      - '7474:7474'
+
+  grobid:
+    image: lfoppiano/grobid:0.7.0
+    ports:
+      - '8070:8070'
