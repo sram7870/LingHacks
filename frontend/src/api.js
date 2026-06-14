@@ -35,15 +35,6 @@ export async function analyzeEnriched(payload) {
   return handleResponse(response);
 }
 
-export async function analyzeRelational(payload) {
-  const response = await fetch(`${apiBase}/analyze/relational`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  return handleResponse(response);
-}
-
 export async function uploadPaper(file) {
   const formData = new FormData();
   formData.append("file", file);
@@ -71,5 +62,17 @@ export async function getVisualizationData(payload) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+  return handleResponse(response);
+}
+
+export async function analyzeUploadedFile(uid) {
+  const response = await fetch(`${apiBase}/analyze/upload/${uid}`, {
+    method: "POST",
+  });
+  return handleResponse(response);
+}
+
+export async function visualizeUploadedFile(uid) {
+  const response = await fetch(`${apiBase}/visualize/upload/${uid}`);
   return handleResponse(response);
 }
