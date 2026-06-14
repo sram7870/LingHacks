@@ -1,6 +1,6 @@
 import re
 from operator import itemgetter
-from typing import List
+from typing import List, Tuple
 
 from app.core.config import settings
 from app.schemas import Claim
@@ -8,6 +8,48 @@ from app.services.document_encoder import ParsedDocument
 
 
 class ClaimExtractor:
+    CLAIM_KEYWORDS = [
+        "improve",
+        "reduce",
+        "increase",
+        "associated",
+        "significant",
+        "evidence",
+        "support",
+        "suggest",
+        "linked",
+        "risk",
+        "benefit",
+        "reduce",
+        "correlat",
+        "predict",
+        "indicate",
+        "demonstrat",
+    ]
+
+    NEGATIVE_PATTERNS = [
+        "not significant",
+        "no significant",
+        "failed to",
+        "did not",
+        "no evidence",
+        "lack of",
+        "not associated",
+        "not correlated",
+        "contradict",
+        "inconsistent",
+    ]
+
+    STRONG_CLAIM_PHRASES = [
+        "we found",
+        "our results",
+        "this study demonstrates",
+        "this work shows",
+        "results indicate",
+        "our findings",
+        "we show",
+    ]
+
     def __init__(self):
         self.model_name = "allenai/scibert_scivocab_uncased"
         self.tokenizer = None
@@ -34,37 +76,68 @@ class ClaimExtractor:
         self._initialize_model()
         candidates = self._collect_candidates(document)
         scored = []
-        for sentence in candidates:
-            score = self._score_sentence(sentence)
-            polarity = "support" if score >= 0.5 else "neutral"
-            scored.append({"sentence": sentence, "score": score, "polarity": polarity})
 
-        top_claims = sorted(scored, key=itemgetter("score"), reverse=True)[:3]
-        return [
-            Claim(text=item["sentence"], polarity=item["polarity"], confidence=round(item["score"], 3))
+        for sentence, section in candidates:
+            score = self._score_sentence(sentence, section)
+            polarity = self._detect_polarity(sentence)
+            scored.append({"sentence": sentence, "score": score, "polarity": polarity, "section": section})
+
+        top_claims = sorted(scored, key=itemgetter("score"), reverse=True)[:5]
+        claims = [
+            Claim(
+                text=item["sentence"],
+                polarity=item["polarity"],
+                confidence=round(item["score"], 3),
+                span_start=None,
+                span_end=None,
+            )
             for item in top_claims
-            if item["score"] > 0.2
+            if item["score"] >= 0.25
         ]
 
-    def _collect_candidates(self, document: ParsedDocument) -> List[str]:
-        sections = [document.abstract] + list(document.sections.values())
-        text = "\n".join([section for section in sections if section])
-        return self._split_sentences(text)
+        if not claims and scored:
+            fallback = sorted(scored, key=itemgetter("score"), reverse=True)[:3]
+            claims = [
+                Claim(
+                    text=item["sentence"],
+                    polarity=item["polarity"],
+                    confidence=round(item["score"], 3),
+                    span_start=None,
+                    span_end=None,
+                )
+                for item in fallback
+            ]
+
+        return claims
+
+    def _collect_candidates(self, document: ParsedDocument) -> List[Tuple[str, str]]:
+        ordered_sections = [
+            (document.abstract or "", "abstract"),
+            (document.sections.get("results") or "", "results"),
+            (document.sections.get("discussion") or "", "discussion"),
+            (document.sections.get("introduction") or "", "introduction"),
+            (document.sections.get("methods") or "", "methods"),
+        ]
+        candidates = []
+        for text, section in ordered_sections:
+            if not text:
+                continue
+            for sentence in self._split_sentences(text):
+                candidates.append((sentence, section))
+        return candidates
 
     def _split_sentences(self, text: str) -> List[str]:
         sentences = re.split(r"(?<=[\.\?\!])\s+", text)
-        return [sentence.strip() for sentence in sentences if len(sentence.strip()) > 30]
+        return [sentence.strip() for sentence in sentences if len(sentence.strip()) > 20]
 
-    def _score_sentence(self, sentence: str) -> float:
+    def _score_sentence(self, sentence: str, section: str) -> float:
         tokens = self.tokenizer(sentence, truncation=True, max_length=128, return_tensors="pt")
         if self._torch is None or self._sigmoid is None:
-            # Should not happen if _initialize_model has run
             raise RuntimeError("Torch dependencies are not initialized")
 
         with self._torch.no_grad():
             output = self.model(**tokens)
 
-        embedding = None
         if hasattr(output, "pooler_output") and output.pooler_output is not None:
             embedding = output.pooler_output
         else:
@@ -72,20 +145,24 @@ class ClaimExtractor:
 
         model_score = float(self._sigmoid(embedding.mean()))
         keyword_bonus = self._keyword_strength(sentence)
-        return min(1.0, max(0.0, 0.25 * model_score + 0.75 * keyword_bonus))
+        pattern_bonus = self._pattern_strength(sentence)
+        section_bonus = 0.15 if section in {"results", "discussion", "abstract"} else 0.0
+        raw = 0.2 * model_score + 0.55 * keyword_bonus + 0.2 * pattern_bonus + section_bonus
+        return min(1.0, max(0.0, raw))
 
     def _keyword_strength(self, sentence: str) -> float:
-        keywords = [
-            "improve",
-            "reduce",
-            "increase",
-            "associated",
-            "significant",
-            "evidence",
-            "study",
-            "patients",
-            "treatment",
-            "risk",
-        ]
-        score = sum(1 for keyword in keywords if keyword in sentence.lower())
-        return min(1.0, score / 4.0)
+        text = sentence.lower()
+        count = sum(1 for keyword in self.CLAIM_KEYWORDS if keyword in text)
+        return min(1.0, (count + 1) / 5.0)
+
+    def _pattern_strength(self, sentence: str) -> float:
+        text = sentence.lower()
+        return 0.25 if any(phrase in text for phrase in self.STRONG_CLAIM_PHRASES) else 0.0
+
+    def _detect_polarity(self, sentence: str) -> str:
+        text = sentence.lower()
+        if any(neg in text for neg in self.NEGATIVE_PATTERNS):
+            return "oppose"
+        if any(word in text for word in ["support", "confirms", "demonstrates", "shows", "linked to", "improve"]):
+            return "support"
+        return "neutral"

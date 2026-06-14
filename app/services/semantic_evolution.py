@@ -35,15 +35,27 @@ class SemanticEvolution:
 
     def _initialize_model(self) -> None:
         if self.model is None:
-            self.model = SentenceTransformer(self.model_name, cache_folder=settings.model_cache_dir)
+            try:
+                self.model = SentenceTransformer(self.model_name, cache_folder=settings.model_cache_dir)
+            except Exception as exc:
+                logger.warning("SemanticEvolution model load failed: %s", exc)
+                self.model = None
 
     def embed_document(self, document: ParsedDocument, year: Optional[int] = None) -> np.ndarray:
         """Generate embedding for a document."""
         self._initialize_model()
         text = " ".join([document.abstract or ""] + list(document.sections.values())).strip()
         text = text[:2000]  # Truncate for efficiency
-        embedding = self.model.encode(text, convert_to_numpy=True)
-        return embedding
+        if self.model is None:
+            logger.warning("SemanticEvolution fallback to zero embedding for document: %s", document.title)
+            return np.zeros(384, dtype=np.float32)
+
+        try:
+            embedding = self.model.encode(text, convert_to_numpy=True)
+            return embedding
+        except Exception as exc:
+            logger.warning("SemanticEvolution encoding failed: %s", exc)
+            return np.zeros(384, dtype=np.float32)
 
     def track_evolution(
         self,

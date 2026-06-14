@@ -1,5 +1,7 @@
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from app.api import router
+import os
 
 app = FastAPI(
     title="LingHacks Scientific Reasoning Backend",
@@ -8,6 +10,11 @@ app = FastAPI(
 )
 
 app.include_router(router)
+
+# Serve uploaded files
+uploads_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'uploads'))
+os.makedirs(uploads_path, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=uploads_path), name="uploads")
 
 
 @app.get("/health", tags=["Health"])

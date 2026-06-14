@@ -36,13 +36,16 @@ class EnrichedPaperAnalysis:
             year=year,
         )
 
-        # Build GNN inputs (simplified for demo)
+        # Build GNN inputs with semantic embeddings if available
         paper_embedding = semantic_snapshot.embedding
         self.gnn_builder.add_paper_node("paper_0", paper_embedding[:128])
 
         for i, claim in enumerate(claims):
-            claim_embedding = np.ones(128) * claim.confidence
-            self.gnn_builder.add_claim_node(f"claim_{i}", claim_embedding)
+            if getattr(claim, "embedding", None):
+                claim_vec = np.array(claim.embedding[:128], dtype=np.float32)
+            else:
+                claim_vec = np.full(128, claim.confidence, dtype=np.float32)
+            self.gnn_builder.add_claim_node(f"claim_{i}", claim_vec)
             self.gnn_builder.add_claim_edge("paper_0", f"claim_{i}")
 
         # GNN predictions
@@ -59,22 +62,28 @@ class EnrichedPaperAnalysis:
             },
             "analysis": {
                 "stance": base_response.stance,
+                "weaknesses": base_response.weaknesses,
                 "evidence_strength": base_response.evidence_strength,
                 "methodological_quality": base_response.methodological_quality,
                 "uncertainty": base_response.uncertainty,
+                "study_design": base_response.study_design,
+                "sample_size": base_response.sample_size,
+                "controversy_cluster": base_response.controversy_cluster,
+                "citation_roles": base_response.citation_role,
             },
             "claims": [
                 {
                     "text": claim.text,
                     "polarity": claim.polarity,
                     "confidence": claim.confidence,
+                    "section": getattr(claim, "section", None),
                 }
                 for claim in claims
             ],
             "methodological_assessment": {
                 "study_design": getattr(review_result, "study_design", "Unknown"),
                 "sample_size": getattr(review_result, "sample_size", 0),
-                "weaknesses": review_result.weaknesses[:3],
+                "weaknesses": review_result.weaknesses[:5],
             },
             "graph_predictions": {
                 "controversy_score": gnn_output["controversy_score"],
@@ -115,10 +124,9 @@ class EnrichedPaperAnalysis:
                 from app.db.graph import KnowledgeGraphClient
                 graph_client = KnowledgeGraphClient()
             except Exception:
-                # Fallback if graph client cannot be initialized
-                pass
+                graph_client = None
 
-        if graph_client:
+        if graph_client is not None and getattr(graph_client, "available", False):
             analyzer = RelationalAnalyzer(
                 graph_client=graph_client,
                 gnn_model=self.gnn_builder.gnn,
@@ -181,33 +189,51 @@ class EnrichedPaperAnalysis:
         review_result: Any,
     ) -> Dict[str, Any]:
         """Generate data optimized for frontend visualization."""
+        author_last = None
+        metadata = getattr(parsed, "metadata", {}) or {}
+        authors = metadata.get("authors") if isinstance(metadata, dict) else None
+        if isinstance(authors, list) and authors:
+            author_last = authors[-1]
+
+        nodes = [
+            {
+                "id": "paper_0",
+                "label": parsed.title or "Untitled paper",
+                "type": "paper",
+                "size": 35,
+                "value": review_result.method_quality,
+                "description": parsed.abstract or "No abstract available.",
+                "publication_year": metadata.get("year") if isinstance(metadata, dict) else None,
+                "authors": authors,
+            }
+        ]
+
+        for i, claim in enumerate(claims):
+            nodes.append({
+                "id": f"claim_{i}",
+                "label": claim.text[:80],
+                "type": "claim",
+                "section": getattr(claim, "section", None) or "unknown",
+                "size": 18,
+                "value": claim.confidence,
+                "papers": [
+                    {
+                        "title": parsed.title,
+                        "author_last": author_last,
+                        "date": metadata.get("year") if isinstance(metadata, dict) else None,
+                    }
+                ],
+            })
+
         return {
-            "nodes": [
-                {
-                    "id": "paper_0",
-                    "label": parsed.title[:50],
-                    "type": "paper",
-                    "size": 30,
-                    "value": review_result.method_quality,
-                },
-            ]
-            + [
-                {
-                    "id": f"claim_{i}",
-                    "label": claim.text[:30],
-                    "type": "claim",
-                    "size": 15,
-                    "value": claim.confidence,
-                }
-                for i, claim in enumerate(claims)
-            ],
+            "nodes": nodes,
             "edges": [
                 {"source": "paper_0", "target": f"claim_{i}", "weight": claim.confidence}
                 for i, claim in enumerate(claims)
             ],
             "stats": {
-                "total_nodes": len(claims) + 1,
+                "total_nodes": len(nodes),
                 "total_edges": len(claims),
-                "network_density": round(len(claims) / max(1, (len(claims) + 1) * len(claims) / 2), 3),
+                "network_density": round(len(claims) / max(1, (len(nodes) * (len(nodes) - 1) / 2)), 3),
             },
         }

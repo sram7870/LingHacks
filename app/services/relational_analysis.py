@@ -137,6 +137,9 @@ class RelationalAnalyzer:
 
     def _get_total_papers_count(self) -> int:
         """Count the total number of Paper nodes currently stored in Neo4j."""
+        if self.graph_client is None or not getattr(self.graph_client, "available", False):
+            return 0
+
         with self.graph_client.driver.session() as session:
             res = session.run("MATCH (p:Paper) RETURN count(p) AS count")
             single = res.single()

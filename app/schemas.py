@@ -17,6 +17,7 @@ class Claim(BaseModel):
     text: str
     polarity: str
     confidence: float
+    section: Optional[str] = None
     span_start: Optional[int] = None
     span_end: Optional[int] = None
     embedding: Optional[List[float]] = None
@@ -39,12 +40,15 @@ class PaperAnalysisResponse(BaseModel):
     sections: Dict[str, str]
     claims: List[Claim]
     stance: dict
+    weaknesses: List[str] = Field(default_factory=list)
     evidence_strength: float
     methodological_quality: float
     controversy_cluster: Optional[int]
     citation_role: List[str]
     semantic_shift_score: float
     uncertainty: float
+    study_design: Optional[str] = None
+    sample_size: Optional[int] = None
 
 
 class ClaimCAS(BaseModel):

@@ -65,23 +65,33 @@ class StanceAgent:
 
 
 class SkepticAgent:
-    WEAK_PHRASES = ["may", "might", "could", "suggest", "some patients", "larger studies", "further research"]
+    WEAK_PHRASES = ["may", "might", "could", "suggest", "some patients", "larger studies", "further research", "possible", "potential"]
+    NEGATIVE_INDICATORS = ["insufficient", "underpowered", "no evidence", "not significant", "failed to", "did not", "lack of"]
 
     def analyze(self, document: ParsedDocument, claims: List[Claim]) -> List[str]:
         weaknesses = []
         context = " ".join([document.abstract or ""] + list(document.sections.values())).lower()
-        if not document.sections.get("methods") or not document.sections.get("results"):
-            weaknesses.append("The methods or results sections are sparse or missing.")
+
+        if not document.sections.get("methods"):
+            weaknesses.append("The methods section is missing or not clearly identified.")
+        if not document.sections.get("results"):
+            weaknesses.append("The results section is missing or not clearly identified.")
 
         for phrase in self.WEAK_PHRASES:
-            if phrase in context and f"The claim {phrase}" not in context:
-                weaknesses.append(f"Contains hedging language such as '{phrase}', which may indicate overgeneralization.")
+            if phrase in context:
+                weaknesses.append(f"Hedging language such as '{phrase}' is present, reducing confidence in the claim.")
+
+        for phrase in self.NEGATIVE_INDICATORS:
+            if phrase in context:
+                weaknesses.append(f"Found cautious or negative wording: '{phrase}'. This suggests weaker evidence.")
 
         if len(claims) == 0:
-            weaknesses.append("No clear claims were extracted from the document.")
+            weaknesses.append("No claims were confidently extracted from this document.")
+        elif len(claims) == 1:
+            weaknesses.append("Only one claim was extracted. Additional evidence or claims would improve robustness.")
 
         if not weaknesses:
-            weaknesses.append("No obvious methodological weaknesses detected from surface analysis.")
+            weaknesses.append("Surface review did not identify obvious weaknesses; deeper review may still be needed.")
 
         return weaknesses
 
@@ -110,7 +120,7 @@ class MethodsAgent:
         for label, keywords in self.DESIGN_KEYWORDS.items():
             if any(keyword in text for keyword in keywords):
                 return label
-        return "Unknown"
+        return "Observational" if text else "Unknown"
 
     def _extract_sample_size(self, text: str) -> int:
         matches = re.findall(r"(?:sample size|n\s*=|n=|participants|patients)\s*(?:of\s*)?(\d{2,5})", text)
@@ -124,12 +134,14 @@ class MethodsAgent:
             score += 0.35
         if results_text:
             score += 0.35
-        if sample_size >= 100:
+        if sample_size >= 200:
             score += 0.2
-        elif sample_size >= 30:
+        elif sample_size >= 50:
             score += 0.1
-        if "p=" in results_text or "p <" in results_text or "p-value" in results_text:
+        if "p=" in results_text or "p <" in results_text or "p-value" in results_text or "confidence interval" in results_text:
             score += 0.1
+        if "randomized" in methods_text or "double blind" in methods_text or "placebo" in methods_text:
+            score += 0.05
         return min(1.0, score)
 
 
@@ -139,11 +151,21 @@ class ConsensusAgent:
         stance: Dict[str, float],
         method_quality: float,
         skepticism: List[str],
+        claims: List[Claim],
     ) -> Dict[str, Any]:
-        controversy_cluster = 1 if method_quality < 0.5 or len(skepticism) > 1 else 0
-        uncertainty = round(max(0.1, min(0.5, 1.0 - method_quality + len(skepticism) * 0.05)), 3)
-        citation_roles = ["support" if stance.get("PTLDS", 0) > 0.5 else "critique"]
-        semantic_shift_score = round(0.2 + (1.0 - method_quality) * 0.3, 3)
+        disagreement = 1.0 - max(stance.values()) if stance else 0.5
+        has_weak_claims = sum(1 for claim in claims if claim.confidence < 0.4)
+        close_weakness = len(skepticism)
+
+        controversy_score = round(min(1.0, disagreement * 0.7 + (1.0 - method_quality) * 0.3 + close_weakness * 0.05), 3)
+        controversy_cluster = 2 if controversy_score > 0.7 else (1 if controversy_score > 0.4 else 0)
+
+        uncertainty = round(min(0.95, max(0.1, (1.0 - method_quality) * 0.35 + controversy_score * 0.35 + (has_weak_claims * 0.05))), 3)
+        citation_roles = ["support" if stance.get("PTLDS", 0) >= 0.5 else "critique"]
+        if stance.get("Neutral", 0.0) > 0.7:
+            citation_roles = ["neutral"]
+
+        semantic_shift_score = round(min(1.0, 0.25 + controversy_score * 0.35 + (1.0 - method_quality) * 0.2), 3)
         return {
             "controversy_cluster": controversy_cluster,
             "citation_roles": citation_roles,
@@ -180,7 +202,7 @@ class AgentReviewCoordinator:
         stance = self.stance_agent.infer_stance(document, claims)
         weaknesses = self.skeptic_agent.analyze(document, claims)
         method_report = self.methods_agent.evaluate(document)
-        consensus = self.consensus_agent.combine(stance, method_report["quality"], weaknesses)
+        consensus = self.consensus_agent.combine(stance, method_report["quality"], weaknesses, claims)
         evidence_strength = round((method_report["quality"] + (1.0 - consensus["uncertainty"])) / 2.0, 3)
 
         # Optionally run ensemble for enhanced uncertainty modeling

@@ -29,6 +29,9 @@ class KnowledgeGraphClient:
             self.driver = GraphDatabase.driver(
                 settings.neo4j_uri,
                 auth=(settings.neo4j_user, settings.neo4j_password),
+                connection_timeout=5.0,
+                max_connection_lifetime=60,
+                max_transaction_retry_time=5.0,
             )
             with self.driver.session() as session:
                 session.run("RETURN 1")
