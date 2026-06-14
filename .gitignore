@@ -1,2 +1,11 @@
 _pycache_/
 .venv/
+models/CACHEDIR.TAG
+models/models--allenai--scibert_scivocab_uncased/.no_exist/24f92d32b1bfb0bcaf9ab193ff3ad01e87732fc1/model.safetensors
+models/models--allenai--scibert_scivocab_uncased/refs/main
+models/models--allenai--scibert_scivocab_uncased/refs/refs/pr/7
+models/models--allenai--scibert_scivocab_uncased/snapshots/24f92d32b1bfb0bcaf9ab193ff3ad01e87732fc1/pytorch_model.bin
+models/models--allenai--scibert_scivocab_uncased/snapshots/24f92d32b1bfb0bcaf9ab193ff3ad01e87732fc1/vocab.txt
+models/models--allenai--scibert_scivocab_uncased/snapshots/7455e7e122a25ed9e2ddb583f08e2de175bfcae7/model.safetensors
+models/models--intfloat--e5-large-v2/snapshots/f169b11e22de13617baa190a028a32f3493550b6/model.safetensors
+models/models--intfloat--e5-large-v2/snapshots/f169b11e22de13617baa190a028a32f3493550b6/vocab.txt
